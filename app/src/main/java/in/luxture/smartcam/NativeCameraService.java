@@ -52,8 +52,6 @@ import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.io.PipedInputStream;
-import java.io.PipedOutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.ByteBuffer;
@@ -71,7 +69,7 @@ public class NativeCameraService extends Service {
     public static volatile String currentStatus = "Initializing Native Camera2...";
     public static volatile String maxSensorResolution = "Detecting...";
     public static volatile String localIpUrl = "http://0.0.0.0:8080";
-    public static volatile int rotationDegrees = 0; // 0, 90, 180, 270
+    public static volatile int rotationDegrees = 0;
     public static volatile boolean torchEnabled = false;
     public static volatile boolean useFrontCamera = false;
     public static volatile float zoomLevel = 1.0f;
@@ -178,7 +176,6 @@ public class NativeCameraService extends Service {
 
             CameraCharacteristics chars = cameraManager.getCameraCharacteristics(activeCameraId);
             sensorArraySize = chars.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE);
-            Integer sensorOrientation = chars.get(CameraCharacteristics.SENSOR_ORIENTATION);
 
             StreamConfigurationMap map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
             if (map != null) {
@@ -195,7 +192,6 @@ public class NativeCameraService extends Service {
                 }
             }
 
-            // Stream in clean Landscape 16:9 HD (1280x720) for zero-lag real-time feed + rotation control
             imageReader = ImageReader.newInstance(1280, 720, ImageFormat.YUV_420_888, 2);
             imageReader.setOnImageAvailableListener(new ImageReader.OnImageAvailableListener() {
                 @Override
@@ -359,7 +355,6 @@ public class NativeCameraService extends Service {
         }).start();
     }
 
-    // Embedded Local HTTP Server (Port 8080 - Exact IP Webcam style + MJPEG live stream)
     private class LocalHttpServer extends NanoHTTPD {
         public LocalHttpServer(int port) {
             super(port);
@@ -382,12 +377,12 @@ public class NativeCameraService extends Service {
             if ("/cmd".equals(uri)) {
                 String action = params.get("action");
                 if (action != null) handleCommand(action);
-                Response r = newFixedLengthResponse(Response.Status.OK, "application/json", "{\"status\":\"ok\",\"rotation\":" + rotationDegrees + "}");
+                String jsonResp = "{\"status\":\"ok\",\"rotation\":" + rotationDegrees + "}";
+                Response r = newFixedLengthResponse(Response.Status.OK, "application/json", jsonResp);
                 r.addHeader("Access-Control-Allow-Origin", "*");
                 return r;
             }
 
-            // Local Built-in Control Panel at http://<Phone-IP>:8080
             String html = "<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>" +
                     "<title>SmartCam Native Local Server</title>" +
                     "<style>body{background:#0b0f19;color:#fff;font-family:sans-serif;text-align:center;margin:0;padding:15px}" +
@@ -396,20 +391,19 @@ public class NativeCameraService extends Service {
                     "<h3>SmartCam Native Hardware Server (" + maxSensorResolution + ")</h3>" +
                     "<div><img id='live' src='/shot.jpg'></div>" +
                     "<div style='margin-top:12px'>" +
-                    "<button onclick="cmd('ROTATE_90')">🔄 Rotate 90° (Fix Vertical/Horizontal)</button>" +
-                    "<button onclick="cmd('TORCH_TOGGLE')">🔦 Torch ON/OFF</button>" +
-                    "<button onclick="cmd('SWITCH_CAM')">📷 Flip Front/Back</button>" +
-                    "<button onclick="cmd('ZOOM_2X')">🔍 Zoom 2x</button>" +
-                    "<button onclick="cmd('ZOOM_1X')">🔍 Zoom 1x</button>" +
-                    "<button onclick="cmd('SIREN_ON')" style='background:#d50000'>🚨 Siren</button>" +
+                    "<button onclick=\"cmd('ROTATE_90')\">Rotate 90</button>" +
+                    "<button onclick=\"cmd('TORCH_TOGGLE')\">Torch ON/OFF</button>" +
+                    "<button onclick=\"cmd('SWITCH_CAM')\">Flip Front/Back</button>" +
+                    "<button onclick=\"cmd('ZOOM_2X')\">Zoom 2x</button>" +
+                    "<button onclick=\"cmd('ZOOM_1X')\">Zoom 1x</button>" +
+                    "<button onclick=\"cmd('SIREN_ON')\" style='background:#d50000'>Siren</button>" +
                     "</div>" +
-                    "<script>setInterval(()=>{document.getElementById('live').src='/shot.jpg?t='+Date.now()},200);" +
+                    "<script>setInterval(function(){document.getElementById('live').src='/shot.jpg?t='+Date.now()},200);" +
                     "function cmd(a){fetch('/cmd?action='+a)}</script></body></html>";
             return newFixedLengthResponse(Response.Status.OK, "text/html", html);
         }
     }
 
-    // Cloud Sync Loop -> Sends Live Frame + Telemetry to vastram.luxture.in & executes Instant Commands
     private void startCloudSyncLoop() {
         cloudScheduler = Executors.newSingleThreadScheduledExecutor();
         cloudScheduler.scheduleWithFixedDelay(new Runnable() {
@@ -440,7 +434,7 @@ public class NativeCameraService extends Service {
                     payload.put("cam_id", camId);
                     payload.put("cam_name", camName);
                     payload.put("peer_id", localIpUrl);
-                    payload.put("resolution", maxSensorResolution + " [" + rotationDegrees + "°]");
+                    payload.put("resolution", maxSensorResolution + " [" + rotationDegrees + " deg]");
                     payload.put("battery", level);
                     payload.put("charging", charging);
                     payload.put("temp", tempC);
