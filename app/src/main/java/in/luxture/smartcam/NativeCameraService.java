@@ -73,6 +73,8 @@ public class NativeCameraService extends Service {
     public static volatile boolean torchEnabled = false;
     public static volatile boolean useFrontCamera = false;
     public static volatile float zoomLevel = 1.0f;
+    public static volatile String lastTrackEvent = "NONE";
+    public static volatile Rect trackedBox = null;
 
     private CameraManager cameraManager;
     private CameraDevice cameraDevice;
@@ -91,6 +93,7 @@ public class NativeCameraService extends Service {
 
     private String lastLat = "26.4499";
     private String lastLng = "74.6399";
+    private byte[] prevLumaGrid = null;
 
     @Override
     public void onCreate() {
@@ -142,13 +145,75 @@ public class NativeCameraService extends Service {
 
         Notification notification = builder
                 .setContentTitle("SmartCam Native Server Active")
-                .setContentText("Local: " + localIpUrl + " | Screen-Off Ready")
+                .setContentText("Local: " + localIpUrl + " | AI Track: " + lastTrackEvent)
                 .setSmallIcon(android.R.drawable.presence_video_online)
                 .setContentIntent(pendingIntent)
                 .setOngoing(true)
                 .build();
 
         startForeground(101, notification);
+    }
+
+    private void updateSubjectTracking(byte[] yuvData, int w, int h) {
+        SharedPreferences prefs = getSharedPreferences("SmartCamPrefs", MODE_PRIVATE);
+        boolean detectHuman = prefs.getBoolean("detect_human", true);
+        boolean detectAnimal = prefs.getBoolean("detect_animal", true);
+        if (!detectHuman && !detectAnimal) {
+            lastTrackEvent = "NONE";
+            trackedBox = null;
+            return;
+        }
+
+        int cols = 32;
+        int rows = 24;
+        byte[] curr = new byte[cols * rows];
+        for (int r = 0; r < rows; r++) {
+            int sy = Math.min(h - 1, (r * h) / rows);
+            for (int c = 0; c < cols; c++) {
+                int sx = Math.min(w - 1, (c * w) / cols);
+                curr[r * cols + c] = yuvData[sy * w + sx];
+            }
+        }
+
+        if (prevLumaGrid != null && prevLumaGrid.length == curr.length) {
+            int minC = cols, maxC = -1, minR = rows, maxR = -1, activeCells = 0;
+            for (int r = 0; r < rows; r++) {
+                for (int c = 0; c < cols; c++) {
+                    int idx = r * cols + c;
+                    int diff = Math.abs((curr[idx] & 0xFF) - (prevLumaGrid[idx] & 0xFF));
+                    if (diff > 26) {
+                        activeCells++;
+                        if (c < minC) minC = c;
+                        if (c > maxC) maxC = c;
+                        if (r < minR) minR = r;
+                        if (r > maxR) maxR = r;
+                    }
+                }
+            }
+
+            if (activeCells >= 6 && maxC >= minC && maxR >= minR) {
+                int boxW = maxC - minC + 1;
+                int boxH = maxR - minR + 1;
+                boolean tallSubject = boxH >= boxW;
+                if (detectHuman && tallSubject) {
+                    lastTrackEvent = "HUMAN_TRACKED";
+                } else if (detectAnimal) {
+                    lastTrackEvent = "ANIMAL_TRACKED";
+                } else {
+                    lastTrackEvent = "HUMAN_TRACKED";
+                }
+
+                int left = (minC * w) / cols;
+                int top = (minR * h) / rows;
+                int right = ((maxC + 1) * w) / cols;
+                int bottom = ((maxR + 1) * h) / rows;
+                trackedBox = new Rect(left, top, right, bottom);
+            } else {
+                lastTrackEvent = "NONE";
+                trackedBox = null;
+            }
+        }
+        prevLumaGrid = curr;
     }
 
     @SuppressLint("MissingPermission")
@@ -201,6 +266,8 @@ public class NativeCameraService extends Service {
                         image = reader.acquireLatestImage();
                         if (image != null) {
                             byte[] nv21 = yuv420ToNv21(image);
+                            updateSubjectTracking(nv21, image.getWidth(), image.getHeight());
+
                             YuvImage yuvImage = new YuvImage(nv21, ImageFormat.NV21, image.getWidth(), image.getHeight(), null);
                             ByteArrayOutputStream out = new ByteArrayOutputStream();
                             yuvImage.compressToJpeg(new Rect(0, 0, image.getWidth(), image.getHeight()), 75, out);
@@ -331,27 +398,24 @@ public class NativeCameraService extends Service {
     }
 
     private void playSirenTone() {
-        new Thread(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    int sampleRate = 8000;
-                    int numSamples = sampleRate * 3;
-                    byte[] generatedSnd = new byte[2 * numSamples];
-                    for (int i = 0; i < numSamples; ++i) {
-                        double freq = (i % 4000 < 2000) ? 880 : 1200;
-                        short val = (short) (Math.sin(2 * Math.PI * i / (sampleRate / freq)) * 32767);
-                        generatedSnd[2 * i] = (byte) (val & 0x00ff);
-                        generatedSnd[2 * i + 1] = (byte) ((val & 0xff00) >>> 8);
-                    }
-                    AudioTrack audioTrack = new AudioTrack(AudioManager.STREAM_ALARM,
-                            sampleRate, AudioFormat.CHANNEL_OUT_MONO,
-                            AudioFormat.ENCODING_PCM_16BIT, generatedSnd.length,
-                            AudioTrack.MODE_STATIC);
-                    audioTrack.write(generatedSnd, 0, generatedSnd.length);
-                    audioTrack.play();
-                } catch (Exception ignored) {}
-            }
+        new Thread(() -> {
+            try {
+                int sampleRate = 8000;
+                int numSamples = sampleRate * 3;
+                byte[] generatedSnd = new byte[2 * numSamples];
+                for (int i = 0; i < numSamples; ++i) {
+                    double freq = (i % 4000 < 2000) ? 880 : 1200;
+                    short val = (short) (Math.sin(2 * Math.PI * i / (sampleRate / freq)) * 32767);
+                    generatedSnd[2 * i] = (byte) (val & 0x00ff);
+                    generatedSnd[2 * i + 1] = (byte) ((val & 0xff00) >>> 8);
+                }
+                AudioTrack audioTrack = new AudioTrack(AudioManager.STREAM_ALARM,
+                        sampleRate, AudioFormat.CHANNEL_OUT_MONO,
+                        AudioFormat.ENCODING_PCM_16BIT, generatedSnd.length,
+                        AudioTrack.MODE_STATIC);
+                audioTrack.write(generatedSnd, 0, generatedSnd.length);
+                audioTrack.play();
+            } catch (Exception ignored) {}
         }).start();
     }
 
@@ -377,8 +441,7 @@ public class NativeCameraService extends Service {
             if ("/cmd".equals(uri)) {
                 String action = params.get("action");
                 if (action != null) handleCommand(action);
-                String jsonResp = "{\"status\":\"ok\",\"rotation\":" + rotationDegrees + "}";
-                Response r = newFixedLengthResponse(Response.Status.OK, "application/json", jsonResp);
+                Response r = newFixedLengthResponse(Response.Status.OK, "application/json", "{\"status\":\"ok\",\"rotation\":" + rotationDegrees + "}");
                 r.addHeader("Access-Control-Allow-Origin", "*");
                 return r;
             }
@@ -391,14 +454,14 @@ public class NativeCameraService extends Service {
                     "<h3>SmartCam Native Hardware Server (" + maxSensorResolution + ")</h3>" +
                     "<div><img id='live' src='/shot.jpg'></div>" +
                     "<div style='margin-top:12px'>" +
-                    "<button onclick=\"cmd('ROTATE_90')\">Rotate 90</button>" +
-                    "<button onclick=\"cmd('TORCH_TOGGLE')\">Torch ON/OFF</button>" +
-                    "<button onclick=\"cmd('SWITCH_CAM')\">Flip Front/Back</button>" +
-                    "<button onclick=\"cmd('ZOOM_2X')\">Zoom 2x</button>" +
-                    "<button onclick=\"cmd('ZOOM_1X')\">Zoom 1x</button>" +
-                    "<button onclick=\"cmd('SIREN_ON')\" style='background:#d50000'>Siren</button>" +
+                    "<button onclick=\"cmd('ROTATE_90')\">🔄 Rotate 90°</button>" +
+                    "<button onclick=\"cmd('TORCH_TOGGLE')\">🔦 Torch ON/OFF</button>" +
+                    "<button onclick=\"cmd('SWITCH_CAM')\">📷 Flip Front/Back</button>" +
+                    "<button onclick=\"cmd('ZOOM_2X')\">🔍 Zoom 2x</button>" +
+                    "<button onclick=\"cmd('ZOOM_1X')\">🔍 Zoom 1x</button>" +
+                    "<button onclick=\"cmd('SIREN_ON')\" style='background:#d50000'>🚨 Siren</button>" +
                     "</div>" +
-                    "<script>setInterval(function(){document.getElementById('live').src='/shot.jpg?t='+Date.now()},200);" +
+                    "<script>setInterval(()=>{document.getElementById('live').src='/shot.jpg?t='+Date.now()},200);" +
                     "function cmd(a){fetch('/cmd?action='+a)}</script></body></html>";
             return newFixedLengthResponse(Response.Status.OK, "text/html", html);
         }
@@ -415,6 +478,9 @@ public class NativeCameraService extends Service {
                     String camId = prefs.getString("cam_id", "cam_1");
                     String camName = prefs.getString("cam_name", "Camera 1 (Native)");
                     String secret = prefs.getString("secret", "LUX2026");
+                    String ownerStr = prefs.getString("owner_id", "").trim();
+                    String sourceType = prefs.getString("source_type", "phone_cam");
+                    String streamUrl = prefs.getString("stream_url", "").trim();
 
                     Intent batIntent = registerReceiver(null, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
                     int level = 100, charging = 1;
@@ -433,14 +499,22 @@ public class NativeCameraService extends Service {
                     payload.put("secret", secret);
                     payload.put("cam_id", camId);
                     payload.put("cam_name", camName);
+                    payload.put("source_type", sourceType);
+                    payload.put("stream_url", streamUrl);
                     payload.put("peer_id", localIpUrl);
-                    payload.put("resolution", maxSensorResolution + " [" + rotationDegrees + " deg]");
+                    payload.put("resolution", maxSensorResolution + " [" + rotationDegrees + "°]");
                     payload.put("battery", level);
                     payload.put("charging", charging);
                     payload.put("temp", tempC);
                     payload.put("ssd_free", getFreeStorageGb());
                     payload.put("lat", lastLat);
                     payload.put("lng", lastLng);
+                    payload.put("ai_event", lastTrackEvent);
+
+                    try {
+                        int oid = Integer.parseInt(ownerStr);
+                        if (oid > 0) payload.put("owner_id", oid);
+                    } catch (Exception ignored) {}
 
                     if (latestJpegFrame != null) {
                         payload.put("frame_b64", Base64.encodeToString(latestJpegFrame, Base64.NO_WRAP));
@@ -486,7 +560,6 @@ public class NativeCameraService extends Service {
         byte[] nv21 = new byte[ySize + uvSize];
 
         ByteBuffer yBuffer = image.getPlanes()[0].getBuffer();
-        ByteBuffer uBuffer = image.getPlanes()[1].getBuffer();
         ByteBuffer vBuffer = image.getPlanes()[2].getBuffer();
 
         int rowStride = image.getPlanes()[0].getRowStride();
@@ -509,7 +582,6 @@ public class NativeCameraService extends Service {
             for (int col = 0; col < width / 2; col++) {
                 int vuPos = col * pixelStride + row * rowStride;
                 nv21[pos++] = vBuffer.get(vuPos);
-                nv21[pos++] = uBuffer.get(vuPos);
             }
         }
         return nv21;
