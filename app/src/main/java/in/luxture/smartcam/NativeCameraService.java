@@ -559,29 +559,34 @@ public class NativeCameraService extends Service {
         int uvSize = width * height / 2;
         byte[] nv21 = new byte[ySize + uvSize];
 
-        ByteBuffer yBuffer = image.getPlanes()[0].getBuffer();
-        ByteBuffer vBuffer = image.getPlanes()[2].getBuffer();
+        Image.Plane yPlane = image.getPlanes()[0];
+        Image.Plane uPlane = image.getPlanes()[1];
+        Image.Plane vPlane = image.getPlanes()[2];
 
-        int rowStride = image.getPlanes()[0].getRowStride();
+        ByteBuffer yBuffer = yPlane.getBuffer();
+        ByteBuffer uBuffer = uPlane.getBuffer();
+        ByteBuffer vBuffer = vPlane.getBuffer();
+
+        int yRowStride = yPlane.getRowStride();
+        int yPixelStride = yPlane.getPixelStride();
         int pos = 0;
-        if (rowStride == width) {
-            yBuffer.get(nv21, 0, ySize);
-            pos += ySize;
-        } else {
-            long yBufferPos = -rowStride;
-            for (; pos < ySize; pos += width) {
-                yBufferPos += rowStride;
-                yBuffer.position((int) yBufferPos);
-                yBuffer.get(nv21, pos, width);
+        for (int row = 0; row < height; row++) {
+            for (int col = 0; col < width; col++) {
+                nv21[pos++] = yBuffer.get(row * yRowStride + col * yPixelStride);
             }
         }
 
-        rowStride = image.getPlanes()[2].getRowStride();
-        int pixelStride = image.getPlanes()[2].getPixelStride();
+        int uRowStride = uPlane.getRowStride();
+        int uPixelStride = uPlane.getPixelStride();
+        int vRowStride = vPlane.getRowStride();
+        int vPixelStride = vPlane.getPixelStride();
+
         for (int row = 0; row < height / 2; row++) {
             for (int col = 0; col < width / 2; col++) {
-                int vuPos = col * pixelStride + row * rowStride;
-                nv21[pos++] = vBuffer.get(vuPos);
+                int vIdx = row * vRowStride + col * vPixelStride;
+                int uIdx = row * uRowStride + col * uPixelStride;
+                nv21[pos++] = vBuffer.get(vIdx);
+                nv21[pos++] = uBuffer.get(uIdx);
             }
         }
         return nv21;
